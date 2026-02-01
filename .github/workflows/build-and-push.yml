@@ -1,0 +1,246 @@
+name: Build and Push Sentry LDAP Image
+
+on:
+  schedule:
+    # Run daily at 00:00 UTC
+    - cron: "0 0 * * *"
+  workflow_dispatch:
+    inputs:
+      force_build:
+        description: "Force build even if no new version"
+        required: false
+        default: "false"
+        type: boolean
+      build_all_missing:
+        description: "Build all missing versions >= 25.0.0"
+        required: false
+        default: "false"
+        type: boolean
+
+env:
+  REGISTRY: ghcr.io
+  IMAGE_NAME: ${{ github.repository }}
+  MIN_VERSION: "25.0.0"
+
+jobs:
+  check-and-build:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+      packages: write
+
+    outputs:
+      versions_to_build: ${{ steps.get_versions.outputs.versions }}
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Get Sentry releases and filter versions
+        id: get_versions
+        run: |
+          # Get all releases from getsentry/self-hosted
+          RELEASES=$(curl -s "https://api.github.com/repos/getsentry/self-hosted/releases?per_page=100")
+
+          # Function to check if version is valid semver (X.Y.Z format)
+          is_semver() {
+            echo "$1" | grep -qE '^[0-9]+\.[0-9]+\.[0-9]+$'
+          }
+
+          # Function to compare semver versions (returns 0 if $1 >= $2)
+          semver_gte() {
+            local v1=$1
+            local v2=$2
+
+            IFS='.' read -r v1_major v1_minor v1_patch <<< "$v1"
+            IFS='.' read -r v2_major v2_minor v2_patch <<< "$v2"
+
+            if [ "$v1_major" -gt "$v2_major" ]; then return 0; fi
+            if [ "$v1_major" -lt "$v2_major" ]; then return 1; fi
+            if [ "$v1_minor" -gt "$v2_minor" ]; then return 0; fi
+            if [ "$v1_minor" -lt "$v2_minor" ]; then return 1; fi
+            if [ "$v1_patch" -ge "$v2_patch" ]; then return 0; fi
+            return 1
+          }
+
+          # Read already built versions
+          if [ -f ".built_versions" ]; then
+            BUILT_VERSIONS=$(cat .built_versions)
+          else
+            BUILT_VERSIONS=""
+          fi
+
+          # Parse releases and filter
+          VERSIONS_TO_BUILD="[]"
+          LATEST_VERSION=""
+
+          while IFS= read -r tag; do
+            # Skip empty tags
+            [ -z "$tag" ] && continue
+
+            # Check if it's valid semver
+            if ! is_semver "$tag"; then
+              echo "Skipping non-semver tag: $tag"
+              continue
+            fi
+
+            # Check if version >= MIN_VERSION
+            if ! semver_gte "$tag" "$MIN_VERSION"; then
+              echo "Skipping version below minimum: $tag"
+              continue
+            fi
+
+            # Track latest version
+            if [ -z "$LATEST_VERSION" ]; then
+              LATEST_VERSION="$tag"
+            fi
+
+            # Check if already built (for daily runs)
+            if [ "${{ github.event.inputs.build_all_missing }}" != "true" ]; then
+              if echo "$BUILT_VERSIONS" | grep -qx "$tag"; then
+                echo "Already built: $tag"
+                continue
+              fi
+              # For daily runs, only build the latest version
+              if [ "$tag" != "$LATEST_VERSION" ]; then
+                continue
+              fi
+            else
+              # For build_all_missing, skip already built versions
+              if echo "$BUILT_VERSIONS" | grep -qx "$tag"; then
+                echo "Already built: $tag"
+                continue
+              fi
+            fi
+
+            echo "Will build: $tag"
+            VERSIONS_TO_BUILD=$(echo "$VERSIONS_TO_BUILD" | jq -c ". + [\"$tag\"]")
+
+          done < <(echo "$RELEASES" | jq -r '.[].tag_name')
+
+          echo "Versions to build: $VERSIONS_TO_BUILD"
+          echo "Latest version: $LATEST_VERSION"
+          echo "versions=$VERSIONS_TO_BUILD" >> $GITHUB_OUTPUT
+          echo "latest=$LATEST_VERSION" >> $GITHUB_OUTPUT
+
+      - name: Check if any versions need building
+        id: check_build
+        run: |
+          VERSIONS='${{ steps.get_versions.outputs.versions }}'
+          COUNT=$(echo "$VERSIONS" | jq 'length')
+
+          if [ "$COUNT" -eq 0 ] && [ "${{ github.event.inputs.force_build }}" != "true" ]; then
+            echo "should_build=false" >> $GITHUB_OUTPUT
+            echo "No new versions to build"
+          else
+            echo "should_build=true" >> $GITHUB_OUTPUT
+            echo "Will build $COUNT version(s)"
+          fi
+
+  build:
+    needs: check-and-build
+    if: needs.check-and-build.outputs.versions_to_build != '[]' || github.event.inputs.force_build == 'true'
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+      packages: write
+
+    strategy:
+      matrix:
+        version: ${{ fromJson(needs.check-and-build.outputs.versions_to_build) }}
+      max-parallel: 2
+      fail-fast: false
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Set up QEMU
+        uses: docker/setup-qemu-action@v3
+
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@v3
+
+      - name: Log in to GitHub Container Registry
+        uses: docker/login-action@v3
+        with:
+          registry: ${{ env.REGISTRY }}
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Check if this is the latest version
+        id: check_latest
+        run: |
+          # Get latest release
+          LATEST=$(curl -s "https://api.github.com/repos/getsentry/self-hosted/releases" | \
+            jq -r '[.[].tag_name | select(test("^[0-9]+\\.[0-9]+\\.[0-9]+$"))] | first')
+
+          if [ "${{ matrix.version }}" = "$LATEST" ]; then
+            echo "is_latest=true" >> $GITHUB_OUTPUT
+          else
+            echo "is_latest=false" >> $GITHUB_OUTPUT
+          fi
+
+      - name: Extract metadata for Docker
+        id: meta
+        uses: docker/metadata-action@v5
+        with:
+          images: ${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}
+          tags: |
+            type=raw,value=${{ matrix.version }}
+            type=raw,value=latest,enable=${{ steps.check_latest.outputs.is_latest }}
+
+      - name: Build and push Docker image
+        uses: docker/build-push-action@v5
+        with:
+          context: .
+          push: true
+          platforms: linux/amd64,linux/arm64
+          tags: ${{ steps.meta.outputs.tags }}
+          labels: ${{ steps.meta.outputs.labels }}
+          build-args: |
+            SENTRY_VERSION=${{ matrix.version }}
+          cache-from: type=gha
+          cache-to: type=gha,mode=max
+
+      - name: Summary
+        run: |
+          echo "## Build Summary" >> $GITHUB_STEP_SUMMARY
+          echo "- **Sentry Version:** ${{ matrix.version }}" >> $GITHUB_STEP_SUMMARY
+          echo "- **Image:** ${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}:${{ matrix.version }}" >> $GITHUB_STEP_SUMMARY
+          echo "- **Is Latest:** ${{ steps.check_latest.outputs.is_latest }}" >> $GITHUB_STEP_SUMMARY
+
+  update-built-versions:
+    needs: [check-and-build, build]
+    if: always() && needs.build.result == 'success'
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Update built versions file
+        run: |
+          VERSIONS='${{ needs.check-and-build.outputs.versions_to_build }}'
+
+          # Append new versions to the file
+          for version in $(echo "$VERSIONS" | jq -r '.[]'); do
+            if ! grep -qx "$version" .built_versions 2>/dev/null; then
+              echo "$version" >> .built_versions
+            fi
+          done
+
+          # Sort versions
+          if [ -f ".built_versions" ]; then
+            sort -V .built_versions -o .built_versions
+          fi
+
+      - name: Commit and push
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "github-actions[bot]@users.noreply.github.com"
+          git add .built_versions
+          git diff --staged --quiet || git commit -m "Update built versions list"
+          git push
