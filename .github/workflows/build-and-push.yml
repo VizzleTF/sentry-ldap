@@ -12,7 +12,7 @@ on:
         default: "false"
         type: boolean
       build_all_missing:
-        description: "Build all missing versions >= 25.0.0"
+        description: "Build all missing versions >= 25.9.0"
         required: false
         default: "false"
         type: boolean
