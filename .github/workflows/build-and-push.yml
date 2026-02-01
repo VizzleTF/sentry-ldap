@@ -27,7 +27,6 @@ jobs:
 
     outputs:
       versions_to_build: ${{ steps.get_versions.outputs.versions }}
-      latest_version: ${{ steps.get_versions.outputs.latest }}
 
     steps:
       - name: Checkout repository
@@ -72,7 +71,6 @@ jobs:
 
           # Parse releases and filter, collect all valid versions
           ALL_VERSIONS=()
-          LATEST_VERSION=""
 
           while IFS= read -r tag; do
             # Skip empty tags
@@ -88,11 +86,6 @@ jobs:
             if ! semver_gte "$tag" "$MIN_VERSION"; then
               echo "Skipping version below minimum: $tag"
               continue
-            fi
-
-            # Track latest version (first one from API is the latest)
-            if [ -z "$LATEST_VERSION" ]; then
-              LATEST_VERSION="$tag"
             fi
 
             # Skip already built versions
@@ -117,9 +110,7 @@ jobs:
           done <<< "$SORTED_VERSIONS"
 
           echo "Versions to build (oldest to newest): $VERSIONS_JSON"
-          echo "Latest version: $LATEST_VERSION"
           echo "versions=$VERSIONS_JSON" >> $GITHUB_OUTPUT
-          echo "latest=$LATEST_VERSION" >> $GITHUB_OUTPUT
 
   build:
     needs: check-versions
@@ -159,15 +150,6 @@ jobs:
           username: ${{ secrets.DOCKERHUB_USERNAME }}
           password: ${{ secrets.DOCKERHUB_TOKEN }}
 
-      - name: Check if this is the latest version
-        id: check_latest
-        run: |
-          if [ "${{ matrix.version }}" = "${{ needs.check-versions.outputs.latest_version }}" ]; then
-            echo "is_latest=true" >> $GITHUB_OUTPUT
-          else
-            echo "is_latest=false" >> $GITHUB_OUTPUT
-          fi
-
       - name: Extract metadata for Docker
         id: meta
         uses: docker/metadata-action@v5
@@ -177,7 +159,6 @@ jobs:
             ${{ env.DOCKERHUB_REGISTRY }}/${{ env.DOCKERHUB_IMAGE }}
           tags: |
             type=raw,value=${{ matrix.version }}
-            type=raw,value=latest,enable=${{ steps.check_latest.outputs.is_latest }}
 
       - name: Build and push Docker image
         uses: docker/build-push-action@v5
@@ -198,7 +179,6 @@ jobs:
           echo "- **Sentry Version:** ${{ matrix.version }}" >> $GITHUB_STEP_SUMMARY
           echo "- **GHCR Image:** ${{ env.GHCR_REGISTRY }}/${{ env.GHCR_IMAGE }}:${{ matrix.version }}" >> $GITHUB_STEP_SUMMARY
           echo "- **Docker Hub Image:** ${{ env.DOCKERHUB_REGISTRY }}/${{ env.DOCKERHUB_IMAGE }}:${{ matrix.version }}" >> $GITHUB_STEP_SUMMARY
-          echo "- **Is Latest:** ${{ steps.check_latest.outputs.is_latest }}" >> $GITHUB_STEP_SUMMARY
 
   update-built-versions:
     needs: [check-versions, build]
