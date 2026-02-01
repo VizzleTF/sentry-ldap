@@ -22,7 +22,7 @@ env:
   DOCKERHUB_REGISTRY: docker.io
   GHCR_IMAGE: ${{ github.repository }}
   DOCKERHUB_IMAGE: vizzle/sentry-ldap
-  MIN_VERSION: "25.0.0"
+  MIN_VERSION: "25.9.0"
 
 jobs:
   check-versions:
