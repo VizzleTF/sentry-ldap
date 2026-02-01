@@ -7,12 +7,7 @@ on:
   workflow_dispatch:
     inputs:
       force_build:
-        description: "Force build even if no new version"
-        required: false
-        default: "false"
-        type: boolean
-      build_all_missing:
-        description: "Build all missing versions >= 25.9.0"
+        description: "Force rebuild of all versions (ignore .built_versions)"
         required: false
         default: "false"
         type: boolean
@@ -65,8 +60,11 @@ jobs:
             return 1
           }
 
-          # Read already built versions
-          if [ -f ".built_versions" ]; then
+          # Read already built versions (skip if force_build)
+          if [ "${{ github.event.inputs.force_build }}" = "true" ]; then
+            BUILT_VERSIONS=""
+            echo "Force build enabled, ignoring .built_versions"
+          elif [ -f ".built_versions" ]; then
             BUILT_VERSIONS=$(cat .built_versions)
           else
             BUILT_VERSIONS=""
@@ -97,22 +95,10 @@ jobs:
               LATEST_VERSION="$tag"
             fi
 
-            # Check if already built (for daily runs)
-            if [ "${{ github.event.inputs.build_all_missing }}" != "true" ]; then
-              if echo "$BUILT_VERSIONS" | grep -qx "$tag"; then
-                echo "Already built: $tag"
-                continue
-              fi
-              # For daily runs, only build the latest version
-              if [ "$tag" != "$LATEST_VERSION" ]; then
-                continue
-              fi
-            else
-              # For build_all_missing, skip already built versions
-              if echo "$BUILT_VERSIONS" | grep -qx "$tag"; then
-                echo "Already built: $tag"
-                continue
-              fi
+            # Skip already built versions
+            if echo "$BUILT_VERSIONS" | grep -qx "$tag"; then
+              echo "Already built: $tag"
+              continue
             fi
 
             echo "Will build: $tag"
@@ -137,7 +123,7 @@ jobs:
 
   build:
     needs: check-versions
-    if: needs.check-versions.outputs.versions_to_build != '[]' || github.event.inputs.force_build == 'true'
+    if: needs.check-versions.outputs.versions_to_build != '[]'
     runs-on: ubuntu-latest
     permissions:
       contents: write
