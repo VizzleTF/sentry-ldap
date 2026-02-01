@@ -11,10 +11,11 @@ LABEL org.opencontainers.image.source="https://github.com/VizzleTF/sentry-ldap"
 RUN apt-get update && \
     apt-get install -y --no-install-recommends \
         build-essential \
+        gcc \
         libldap2-dev \
         libsasl2-dev && \
-    pip install --no-cache-dir sentry-auth-ldap && \
-    apt-get purge -y --auto-remove build-essential && \
+    /.venv/bin/pip install --no-cache-dir python-ldap django-auth-ldap sentry-auth-ldap && \
+    apt-get purge -y --auto-remove build-essential gcc && \
     apt-get clean && \
     rm -rf /var/lib/apt/lists/*
 

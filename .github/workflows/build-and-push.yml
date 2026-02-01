@@ -25,14 +25,14 @@ env:
   MIN_VERSION: "25.0.0"
 
 jobs:
-  check-and-build:
+  check-versions:
     runs-on: ubuntu-latest
     permissions:
-      contents: write
-      packages: write
+      contents: read
 
     outputs:
       versions_to_build: ${{ steps.get_versions.outputs.versions }}
+      latest_version: ${{ steps.get_versions.outputs.latest }}
 
     steps:
       - name: Checkout repository
@@ -72,8 +72,8 @@ jobs:
             BUILT_VERSIONS=""
           fi
 
-          # Parse releases and filter
-          VERSIONS_TO_BUILD="[]"
+          # Parse releases and filter, collect all valid versions
+          ALL_VERSIONS=()
           LATEST_VERSION=""
 
           while IFS= read -r tag; do
@@ -92,7 +92,7 @@ jobs:
               continue
             fi
 
-            # Track latest version
+            # Track latest version (first one from API is the latest)
             if [ -z "$LATEST_VERSION" ]; then
               LATEST_VERSION="$tag"
             fi
@@ -116,32 +116,28 @@ jobs:
             fi
 
             echo "Will build: $tag"
-            VERSIONS_TO_BUILD=$(echo "$VERSIONS_TO_BUILD" | jq -c ". + [\"$tag\"]")
+            ALL_VERSIONS+=("$tag")
 
           done < <(echo "$RELEASES" | jq -r '.[].tag_name')
 
-          echo "Versions to build: $VERSIONS_TO_BUILD"
+          # Sort versions ascending (oldest first) so latest is built last
+          SORTED_VERSIONS=$(printf '%s\n' "${ALL_VERSIONS[@]}" | sort -V)
+
+          # Convert to JSON array
+          VERSIONS_JSON="[]"
+          while IFS= read -r version; do
+            [ -z "$version" ] && continue
+            VERSIONS_JSON=$(echo "$VERSIONS_JSON" | jq -c ". + [\"$version\"]")
+          done <<< "$SORTED_VERSIONS"
+
+          echo "Versions to build (oldest to newest): $VERSIONS_JSON"
           echo "Latest version: $LATEST_VERSION"
-          echo "versions=$VERSIONS_TO_BUILD" >> $GITHUB_OUTPUT
+          echo "versions=$VERSIONS_JSON" >> $GITHUB_OUTPUT
           echo "latest=$LATEST_VERSION" >> $GITHUB_OUTPUT
 
-      - name: Check if any versions need building
-        id: check_build
-        run: |
-          VERSIONS='${{ steps.get_versions.outputs.versions }}'
-          COUNT=$(echo "$VERSIONS" | jq 'length')
-
-          if [ "$COUNT" -eq 0 ] && [ "${{ github.event.inputs.force_build }}" != "true" ]; then
-            echo "should_build=false" >> $GITHUB_OUTPUT
-            echo "No new versions to build"
-          else
-            echo "should_build=true" >> $GITHUB_OUTPUT
-            echo "Will build $COUNT version(s)"
-          fi
-
   build:
-    needs: check-and-build
-    if: needs.check-and-build.outputs.versions_to_build != '[]' || github.event.inputs.force_build == 'true'
+    needs: check-versions
+    if: needs.check-versions.outputs.versions_to_build != '[]' || github.event.inputs.force_build == 'true'
     runs-on: ubuntu-latest
     permissions:
       contents: write
@@ -149,8 +145,8 @@ jobs:
 
     strategy:
       matrix:
-        version: ${{ fromJson(needs.check-and-build.outputs.versions_to_build) }}
-      max-parallel: 2
+        version: ${{ fromJson(needs.check-versions.outputs.versions_to_build) }}
+      max-parallel: 1
       fail-fast: false
 
     steps:
@@ -180,11 +176,7 @@ jobs:
       - name: Check if this is the latest version
         id: check_latest
         run: |
-          # Get latest release
-          LATEST=$(curl -s "https://api.github.com/repos/getsentry/self-hosted/releases" | \
-            jq -r '[.[].tag_name | select(test("^[0-9]+\\.[0-9]+\\.[0-9]+$"))] | first')
-
-          if [ "${{ matrix.version }}" = "$LATEST" ]; then
+          if [ "${{ matrix.version }}" = "${{ needs.check-versions.outputs.latest_version }}" ]; then
             echo "is_latest=true" >> $GITHUB_OUTPUT
           else
             echo "is_latest=false" >> $GITHUB_OUTPUT
@@ -223,7 +215,7 @@ jobs:
           echo "- **Is Latest:** ${{ steps.check_latest.outputs.is_latest }}" >> $GITHUB_STEP_SUMMARY
 
   update-built-versions:
-    needs: [check-and-build, build]
+    needs: [check-versions, build]
     if: always() && needs.build.result == 'success'
     runs-on: ubuntu-latest
     permissions:
@@ -235,7 +227,7 @@ jobs:
 
       - name: Update built versions file
         run: |
-          VERSIONS='${{ needs.check-and-build.outputs.versions_to_build }}'
+          VERSIONS='${{ needs.check-versions.outputs.versions_to_build }}'
 
           # Append new versions to the file
           for version in $(echo "$VERSIONS" | jq -r '.[]'); do
