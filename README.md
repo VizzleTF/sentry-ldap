@@ -10,20 +10,24 @@ docker pull ghcr.io/vizzletf/sentry-ldap:latest
 
 ## Usage
 
-This image extends the official Sentry image with `sentry-auth-ldap` package pre-installed.
+This image extends the official Sentry image with `sentry-auth-ldap`, `django-auth-ldap` and `python-ldap` pre-installed. Images exist for Sentry 25.9.0 and later.
 
-### With Docker Compose (Self-Hosted Sentry)
+### With self-hosted Sentry
 
-1. Clone the [getsentry/self-hosted](https://github.com/getsentry/self-hosted) repository
-2. Replace the Sentry image in `docker-compose.yml`:
+The self-hosted `docker-compose.yml` builds a local image `FROM ${SENTRY_IMAGE}`, so point `SENTRY_IMAGE` at this image. Use the tag that matches your self-hosted release.
 
-```yaml
-x-sentry-defaults: &sentry_defaults
-  image: ghcr.io/vizzletf/sentry-ldap:latest
-```
+1. Clone [getsentry/self-hosted](https://github.com/getsentry/self-hosted) and check out your release, for example `26.11.0`.
+2. Create `.env.custom` from `.env` and set the image:
 
-3. Add LDAP configuration to `sentry/sentry.conf.py` (see `sentry.conf.example.py`)
-4. Run `./install.sh` and `docker compose up -d`
+   ```bash
+   cp .env .env.custom
+   sed -i 's|^SENTRY_IMAGE=.*|SENTRY_IMAGE=ghcr.io/vizzletf/sentry-ldap:26.11.0|' .env.custom
+   ```
+
+3. Add the LDAP settings to `sentry/sentry.conf.py` (see `sentry.conf.example.py`).
+4. Run `./install.sh`, then `docker compose up -d`.
+
+Do not replace `image:` in `docker-compose.yml`: the compose file builds and tags the local image from `SENTRY_IMAGE`, so a replaced `image:` ends up without LDAP support.
 
 ### Configuration
 
@@ -37,12 +41,12 @@ Copy `sentry.conf.example.py` to your Sentry config directory and modify the set
 ## Available Tags
 
 - `latest` - Latest Sentry version with LDAP support
-- `<version>` - Specific Sentry version (e.g., `24.1.0`)
+- `<version>` - Specific Sentry version (e.g., `26.11.0`)
 
 ## Building Locally
 
 ```bash
-docker build --build-arg SENTRY_VERSION=24.1.0 -t sentry-ldap:24.1.0 .
+docker build --build-arg SENTRY_VERSION=26.11.0 -t sentry-ldap:26.11.0 .
 ```
 
 ## GitHub Actions

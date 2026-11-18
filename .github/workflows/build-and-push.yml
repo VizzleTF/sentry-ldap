@@ -19,6 +19,11 @@ env:
   DOCKERHUB_IMAGE: vizzle/sentry-ldap
   MIN_VERSION: "25.9.0"
 
+# Never run two builds at once: both would push tags and race on .built_versions
+concurrency:
+  group: ${{ github.workflow }}
+  cancel-in-progress: false
+
 jobs:
   check-versions:
     runs-on: ubuntu-latest
@@ -27,16 +32,19 @@ jobs:
 
     outputs:
       versions_to_build: ${{ steps.get_versions.outputs.versions }}
+      latest: ${{ steps.get_versions.outputs.latest }}
 
     steps:
       - name: Checkout repository
-        uses: actions/checkout@v4
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
 
       - name: Get Sentry releases and filter versions
         id: get_versions
+        env:
+          GH_TOKEN: ${{ github.token }}
         run: |
-          # Get all releases from getsentry/self-hosted
-          RELEASES=$(curl -s "https://api.github.com/repos/getsentry/self-hosted/releases?per_page=100")
+          # gh fails the step on API errors; curl -s turned them into "nothing to build"
+          RELEASES=$(gh api "repos/getsentry/self-hosted/releases?per_page=100")
 
           # Function to check if version is valid semver (X.Y.Z format)
           is_semver() {
@@ -71,6 +79,7 @@ jobs:
 
           # Parse releases and filter, collect all valid versions
           ALL_VERSIONS=()
+          LATEST=""
 
           while IFS= read -r tag; do
             # Skip empty tags
@@ -86,6 +95,10 @@ jobs:
             if ! semver_gte "$tag" "$MIN_VERSION"; then
               echo "Skipping version below minimum: $tag"
               continue
+            fi
+
+            if [ -z "$LATEST" ] || [ "$(printf '%s\n' "$LATEST" "$tag" | sort -V | tail -1)" = "$tag" ]; then
+              LATEST="$tag"
             fi
 
             # Skip already built versions
@@ -110,14 +123,17 @@ jobs:
           done <<< "$SORTED_VERSIONS"
 
           echo "Versions to build (oldest to newest): $VERSIONS_JSON"
-          echo "versions=$VERSIONS_JSON" >> $GITHUB_OUTPUT
+          echo "versions=$VERSIONS_JSON" >> "$GITHUB_OUTPUT"
+          echo "Latest release: $LATEST"
+          echo "latest=$LATEST" >> "$GITHUB_OUTPUT"
 
   build:
     needs: check-versions
     if: needs.check-versions.outputs.versions_to_build != '[]'
     runs-on: ubuntu-latest
+    timeout-minutes: 60
     permissions:
-      contents: write
+      contents: read
       packages: write
 
     strategy:
@@ -128,23 +144,23 @@ jobs:
 
     steps:
       - name: Checkout repository
-        uses: actions/checkout@v4
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
 
       - name: Set up QEMU
-        uses: docker/setup-qemu-action@v3
+        uses: docker/setup-qemu-action@99012661954931238ded8c8b007157a8430204e1 # v4.4.0
 
       - name: Set up Docker Buildx
-        uses: docker/setup-buildx-action@v3
+        uses: docker/setup-buildx-action@f87e5991a6d7451dcb8d9637bfbc97413f497069 # v4.4.1
 
       - name: Log in to GitHub Container Registry
-        uses: docker/login-action@v3
+        uses: docker/login-action@8aa5831fb8d48d8f76594c7ddde61ae58019f550 # v4.8.0
         with:
           registry: ${{ env.GHCR_REGISTRY }}
           username: ${{ github.actor }}
           password: ${{ secrets.GITHUB_TOKEN }}
 
       - name: Log in to Docker Hub
-        uses: docker/login-action@v3
+        uses: docker/login-action@8aa5831fb8d48d8f76594c7ddde61ae58019f550 # v4.8.0
         with:
           registry: ${{ env.DOCKERHUB_REGISTRY }}
           username: ${{ secrets.DOCKERHUB_USERNAME }}
@@ -152,16 +168,17 @@ jobs:
 
       - name: Extract metadata for Docker
         id: meta
-        uses: docker/metadata-action@v5
+        uses: docker/metadata-action@dc802804100637a589fabce1cb79ff13a1411302 # v6.2.0
         with:
           images: |
             ${{ env.GHCR_REGISTRY }}/${{ env.GHCR_IMAGE }}
             ${{ env.DOCKERHUB_REGISTRY }}/${{ env.DOCKERHUB_IMAGE }}
           tags: |
             type=raw,value=${{ matrix.version }}
+            type=raw,value=latest,enable=${{ matrix.version == needs.check-versions.outputs.latest }}
 
       - name: Build and push Docker image
-        uses: docker/build-push-action@v5
+        uses: docker/build-push-action@c3c9e263c25d99ce0380d002d59b67737d91b0dc # v7.4.0
         with:
           context: .
           push: true
@@ -170,15 +187,16 @@ jobs:
           labels: ${{ steps.meta.outputs.labels }}
           build-args: |
             SENTRY_VERSION=${{ matrix.version }}
+          sbom: true
           cache-from: type=gha
           cache-to: type=gha,mode=max
 
       - name: Summary
         run: |
-          echo "## Build Summary" >> $GITHUB_STEP_SUMMARY
-          echo "- **Sentry Version:** ${{ matrix.version }}" >> $GITHUB_STEP_SUMMARY
-          echo "- **GHCR Image:** ${{ env.GHCR_REGISTRY }}/${{ env.GHCR_IMAGE }}:${{ matrix.version }}" >> $GITHUB_STEP_SUMMARY
-          echo "- **Docker Hub Image:** ${{ env.DOCKERHUB_REGISTRY }}/${{ env.DOCKERHUB_IMAGE }}:${{ matrix.version }}" >> $GITHUB_STEP_SUMMARY
+          echo "## Build Summary" >> "$GITHUB_STEP_SUMMARY"
+          echo "- **Sentry Version:** ${{ matrix.version }}" >> "$GITHUB_STEP_SUMMARY"
+          echo "- **GHCR Image:** ${{ env.GHCR_REGISTRY }}/${{ env.GHCR_IMAGE }}:${{ matrix.version }}" >> "$GITHUB_STEP_SUMMARY"
+          echo "- **Docker Hub Image:** ${{ env.DOCKERHUB_REGISTRY }}/${{ env.DOCKERHUB_IMAGE }}:${{ matrix.version }}" >> "$GITHUB_STEP_SUMMARY"
 
   update-built-versions:
     needs: [check-versions, build]
@@ -189,7 +207,7 @@ jobs:
 
     steps:
       - name: Checkout repository
-        uses: actions/checkout@v4
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
 
       - name: Update built versions file
         run: |
