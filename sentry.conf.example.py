@@ -58,7 +58,8 @@ AUTH_LDAP_GROUP_TYPE = GroupOfUniqueNamesType()
 # Sentry-specific LDAP Settings
 # =============================================================================
 
-# Default organization for new LDAP users (use organization slug)
+# Default organization for new LDAP users: the slug of an existing organization.
+# If no organization has this slug, new users get no membership.
 AUTH_LDAP_SENTRY_DEFAULT_ORGANIZATION = 'my-organization'
 
 # Default role for new users: 'owner', 'admin', 'manager', 'member'
@@ -97,8 +98,9 @@ AUTH_LDAP_FIND_GROUP_PERMS = False
 # Managed Fields
 # =============================================================================
 
-# Fields that users cannot edit in Sentry UI (managed by LDAP)
-SENTRY_MANAGED_USER_FIELDS = ('email', 'first_name', 'last_name', 'password')
+# Fields that users cannot edit in Sentry UI (managed by LDAP).
+# Sentry accepts only 'email' and 'name'; username and password are never editable for LDAP users.
+SENTRY_MANAGED_USER_FIELDS = ('email', 'name')
 
 # =============================================================================
 # Register LDAP Backend

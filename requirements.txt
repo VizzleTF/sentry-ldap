@@ -1,0 +1,9 @@
+# LDAP packages added to the Sentry image. Hash-pinned; installed with --no-deps (see Dockerfile).
+python-ldap==3.4.8 \
+    --hash=sha256:18dc7460470c6ff64ed5c04ee21c56dbfee7ab433a53213ba91e407eea44c34c
+django-auth-ldap==4.1.0 \
+    --hash=sha256:68870e7921e84b1a9867e268a9c8a3e573e8a0d95ea08bcf31be178f5826ff36 \
+    --hash=sha256:77f749d3b17807ce8eb56a9c9c8e5746ff316567f81d5ba613495d9c7495a949
+sentry-auth-ldap==24.8.1.post1 \
+    --hash=sha256:9a0bef0b4a1a44d18923f31415d3736e229e6b6d13d8315e1d223511247f425c \
+    --hash=sha256:19426434b0e895f56217d835fa222d701f8d5a68d3d0c2008293ea34dbb5ecb7

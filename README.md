@@ -17,11 +17,11 @@ This image extends the official Sentry image with `sentry-auth-ldap`, `django-au
 The self-hosted `docker-compose.yml` builds a local image `FROM ${SENTRY_IMAGE}`, so point `SENTRY_IMAGE` at this image. Use the tag that matches your self-hosted release.
 
 1. Clone [getsentry/self-hosted](https://github.com/getsentry/self-hosted) and check out your release, for example `26.11.0`.
-2. Create `.env.custom` from `.env` and set the image:
+2. Create `.env.custom` from `.env` and set the image. The later `SENTRY_IMAGE` line wins:
 
    ```bash
    cp .env .env.custom
-   sed -i 's|^SENTRY_IMAGE=.*|SENTRY_IMAGE=ghcr.io/vizzletf/sentry-ldap:26.11.0|' .env.custom
+   echo 'SENTRY_IMAGE=ghcr.io/vizzletf/sentry-ldap:26.11.0' >> .env.custom
    ```
 
 3. Add the LDAP settings to `sentry/sentry.conf.py` (see `sentry.conf.example.py`).
@@ -45,9 +45,13 @@ Copy `sentry.conf.example.py` to your Sentry config directory and modify the set
 
 ## Building Locally
 
+`SENTRY_VERSION` is required. The build needs BuildKit, the default builder since Docker 23.
+
 ```bash
 docker build --build-arg SENTRY_VERSION=26.11.0 -t sentry-ldap:26.11.0 .
 ```
+
+The LDAP packages are pinned with hashes in `requirements.txt`. The build fails if the LDAP backend does not load against that Sentry version.
 
 ## GitHub Actions
 
@@ -55,6 +59,8 @@ The workflow automatically:
 - Checks for new Sentry releases daily at 00:00 UTC
 - Builds and pushes new images when updates are found
 - Supports manual trigger with force build option
+- Opens or updates the issue "Image build is failing" when a run fails
+- Attests build provenance; verify an image with `gh attestation verify oci://ghcr.io/vizzletf/sentry-ldap:26.11.0 -R VizzleTF/sentry-ldap`
 
 ## License
 

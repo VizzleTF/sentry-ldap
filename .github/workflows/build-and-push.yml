@@ -9,7 +9,7 @@ on:
       force_build:
         description: "Force rebuild of all versions (ignore .built_versions)"
         required: false
-        default: "false"
+        default: false
         type: boolean
 
 env:
@@ -27,6 +27,7 @@ concurrency:
 jobs:
   check-versions:
     runs-on: ubuntu-latest
+    timeout-minutes: 10
     permissions:
       contents: read
 
@@ -42,89 +43,32 @@ jobs:
         id: get_versions
         env:
           GH_TOKEN: ${{ github.token }}
+          FORCE_BUILD: ${{ inputs.force_build }}
         run: |
-          # gh fails the step on API errors; curl -s turned them into "nothing to build"
-          RELEASES=$(gh api "repos/getsentry/self-hosted/releases?per_page=100")
+          set -euo pipefail
 
-          # Function to check if version is valid semver (X.Y.Z format)
-          is_semver() {
-            echo "$1" | grep -qE '^[0-9]+\.[0-9]+\.[0-9]+$'
-          }
+          # Published X.Y.Z releases >= MIN_VERSION, oldest first so latest is built last
+          gh api "repos/getsentry/self-hosted/releases?per_page=100" \
+            --jq '.[] | select((.draft or .prerelease) | not) | .tag_name' \
+            | grep -E '^[0-9]+\.[0-9]+\.[0-9]+$' | sort -V \
+            | while read -r v; do
+                if [ "$(printf '%s\n' "$MIN_VERSION" "$v" | sort -V | head -1)" = "$MIN_VERSION" ]; then
+                  echo "$v"
+                fi
+              done > eligible.txt
+          LATEST=$(tail -1 eligible.txt)
 
-          # Function to compare semver versions (returns 0 if $1 >= $2)
-          semver_gte() {
-            local v1=$1
-            local v2=$2
-
-            IFS='.' read -r v1_major v1_minor v1_patch <<< "$v1"
-            IFS='.' read -r v2_major v2_minor v2_patch <<< "$v2"
-
-            if [ "$v1_major" -gt "$v2_major" ]; then return 0; fi
-            if [ "$v1_major" -lt "$v2_major" ]; then return 1; fi
-            if [ "$v1_minor" -gt "$v2_minor" ]; then return 0; fi
-            if [ "$v1_minor" -lt "$v2_minor" ]; then return 1; fi
-            if [ "$v1_patch" -ge "$v2_patch" ]; then return 0; fi
-            return 1
-          }
-
-          # Read already built versions (skip if force_build)
-          if [ "${{ github.event.inputs.force_build }}" = "true" ]; then
-            BUILT_VERSIONS=""
+          if [ "$FORCE_BUILD" = "true" ]; then
             echo "Force build enabled, ignoring .built_versions"
-          elif [ -f ".built_versions" ]; then
-            BUILT_VERSIONS=$(cat .built_versions)
+            cp eligible.txt to_build.txt
           else
-            BUILT_VERSIONS=""
+            grep -vxFf .built_versions eligible.txt > to_build.txt || true
           fi
 
-          # Parse releases and filter, collect all valid versions
-          ALL_VERSIONS=()
-          LATEST=""
-
-          while IFS= read -r tag; do
-            # Skip empty tags
-            [ -z "$tag" ] && continue
-
-            # Check if it's valid semver
-            if ! is_semver "$tag"; then
-              echo "Skipping non-semver tag: $tag"
-              continue
-            fi
-
-            # Check if version >= MIN_VERSION
-            if ! semver_gte "$tag" "$MIN_VERSION"; then
-              echo "Skipping version below minimum: $tag"
-              continue
-            fi
-
-            if [ -z "$LATEST" ] || [ "$(printf '%s\n' "$LATEST" "$tag" | sort -V | tail -1)" = "$tag" ]; then
-              LATEST="$tag"
-            fi
-
-            # Skip already built versions
-            if echo "$BUILT_VERSIONS" | grep -qx "$tag"; then
-              echo "Already built: $tag"
-              continue
-            fi
-
-            echo "Will build: $tag"
-            ALL_VERSIONS+=("$tag")
-
-          done < <(echo "$RELEASES" | jq -r '.[].tag_name')
-
-          # Sort versions ascending (oldest first) so latest is built last
-          SORTED_VERSIONS=$(printf '%s\n' "${ALL_VERSIONS[@]}" | sort -V)
-
-          # Convert to JSON array
-          VERSIONS_JSON="[]"
-          while IFS= read -r version; do
-            [ -z "$version" ] && continue
-            VERSIONS_JSON=$(echo "$VERSIONS_JSON" | jq -c ". + [\"$version\"]")
-          done <<< "$SORTED_VERSIONS"
-
+          VERSIONS_JSON=$(jq -Rnc '[inputs]' < to_build.txt)
           echo "Versions to build (oldest to newest): $VERSIONS_JSON"
-          echo "versions=$VERSIONS_JSON" >> "$GITHUB_OUTPUT"
           echo "Latest release: $LATEST"
+          echo "versions=$VERSIONS_JSON" >> "$GITHUB_OUTPUT"
           echo "latest=$LATEST" >> "$GITHUB_OUTPUT"
 
   build:
@@ -135,6 +79,8 @@ jobs:
     permissions:
       contents: read
       packages: write
+      id-token: write
+      attestations: write
 
     strategy:
       matrix:
@@ -177,7 +123,9 @@ jobs:
             type=raw,value=${{ matrix.version }}
             type=raw,value=latest,enable=${{ matrix.version == needs.check-versions.outputs.latest }}
 
+      # No build cache: each version has its own base image, so a cache never hits
       - name: Build and push Docker image
+        id: build
         uses: docker/build-push-action@c3c9e263c25d99ce0380d002d59b67737d91b0dc # v7.4.0
         with:
           context: .
@@ -188,47 +136,102 @@ jobs:
           build-args: |
             SENTRY_VERSION=${{ matrix.version }}
           sbom: true
-          cache-from: type=gha
-          cache-to: type=gha,mode=max
 
-      - name: Summary
+      # Signed provenance, verifiable with `gh attestation verify oci://<image>@<digest> -R <repo>`
+      - name: Attest build provenance
+        uses: actions/attest@1e69f48acb82d1966a394da916b4c1698aa569d6 # v4.2.2
+        with:
+          subject-name: ${{ env.GHCR_REGISTRY }}/${{ env.GHCR_IMAGE }}
+          subject-digest: ${{ steps.build.outputs.digest }}
+
+      - name: Mark version as built
+        env:
+          VERSION: ${{ matrix.version }}
         run: |
-          echo "## Build Summary" >> "$GITHUB_STEP_SUMMARY"
-          echo "- **Sentry Version:** ${{ matrix.version }}" >> "$GITHUB_STEP_SUMMARY"
-          echo "- **GHCR Image:** ${{ env.GHCR_REGISTRY }}/${{ env.GHCR_IMAGE }}:${{ matrix.version }}" >> "$GITHUB_STEP_SUMMARY"
-          echo "- **Docker Hub Image:** ${{ env.DOCKERHUB_REGISTRY }}/${{ env.DOCKERHUB_IMAGE }}:${{ matrix.version }}" >> "$GITHUB_STEP_SUMMARY"
+          mkdir -p built && touch "built/$VERSION"
+          {
+            echo "## Build Summary"
+            echo "- **Sentry Version:** $VERSION"
+            echo "- **GHCR Image:** $GHCR_REGISTRY/$GHCR_IMAGE:$VERSION"
+            echo "- **Docker Hub Image:** $DOCKERHUB_REGISTRY/$DOCKERHUB_IMAGE:$VERSION"
+          } >> "$GITHUB_STEP_SUMMARY"
 
+      - name: Upload built marker
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: built-${{ matrix.version }}
+          path: built/
+          retention-days: 1
+
+  # Records every version that built, even if other versions in the matrix failed
   update-built-versions:
     needs: [check-versions, build]
-    if: always() && needs.build.result == 'success'
+    if: always() && needs.check-versions.result == 'success' && needs.build.result != 'skipped'
     runs-on: ubuntu-latest
+    timeout-minutes: 10
     permissions:
       contents: write
 
     steps:
       - name: Checkout repository
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          ref: ${{ github.event.repository.default_branch }}
+
+      - name: Download built markers
+        uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
+        with:
+          pattern: built-*
+          path: built
+          merge-multiple: true
 
       - name: Update built versions file
         run: |
-          VERSIONS='${{ needs.check-versions.outputs.versions_to_build }}'
-
-          # Append new versions to the file
-          for version in $(echo "$VERSIONS" | jq -r '.[]'); do
-            if ! grep -qx "$version" .built_versions 2>/dev/null; then
-              echo "$version" >> .built_versions
-            fi
+          set -euo pipefail
+          shopt -s nullglob
+          for path in built/*; do
+            version=${path#built/}
+            grep -qxF "$version" .built_versions || echo "$version" >> .built_versions
           done
-
-          # Sort versions
-          if [ -f ".built_versions" ]; then
-            sort -V .built_versions -o .built_versions
-          fi
+          sort -V .built_versions -o .built_versions
 
       - name: Commit and push
+        env:
+          BRANCH: ${{ github.event.repository.default_branch }}
         run: |
+          set -euo pipefail
           git config user.name "github-actions[bot]"
           git config user.email "github-actions[bot]@users.noreply.github.com"
           git add .built_versions
-          git diff --staged --quiet || git commit -m "Update built versions list"
-          git push
+          if git diff --staged --quiet; then exit 0; fi
+          git commit -m "Record built versions: $(find built -type f -printf '%f\n' | sort -V | xargs)"
+          # main may have moved during a long build
+          for _ in 1 2 3; do
+            git pull --rebase origin "$BRANCH" && git push origin "HEAD:$BRANCH" && exit 0
+            sleep 5
+          done
+          exit 1
+
+  notify-failure:
+    needs: [check-versions, build, update-built-versions]
+    if: failure()
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    permissions:
+      issues: write
+
+    steps:
+      - name: Open or update the failure issue
+        env:
+          GH_TOKEN: ${{ github.token }}
+          GH_REPO: ${{ github.repository }}
+          RUN_URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
+        run: |
+          set -euo pipefail
+          TITLE="Image build is failing"
+          NUMBER=$(gh issue list --state open --search "\"$TITLE\" in:title" --json number --jq '.[0].number // empty')
+          if [ -n "$NUMBER" ]; then
+            gh issue comment "$NUMBER" --body "Failed again: $RUN_URL"
+          else
+            gh issue create --title "$TITLE" --body "Run failed: $RUN_URL. Close this issue once the build is fixed."
+          fi
